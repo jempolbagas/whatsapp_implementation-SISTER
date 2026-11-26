@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Environment secrets (never commit Neon DATABASE_URL, JWT secrets, or backup keys)
+.env
+.env.*
+!.env.example
+
+# Backup storage runtime snapshots
+backups/
+
+# Logs & caches
+*.log
+npm-debug.log*
+.cache/
+
+# OS files (Windows & Linux)
+.DS_Store
+Thumbs.db
+desktop.ini

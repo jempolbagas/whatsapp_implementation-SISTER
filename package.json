@@ -1,0 +1,21 @@
+{
+  "name": "wa-sister",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm -w @wa-sister/shared run build && npm -w @wa-sister/backup-server run build",
+    "db:push": "node packages/shared/dist/db/migrate.js",
+    "db:seed": "node packages/shared/dist/db/seed.js",
+    "dev:backup": "node apps/backup-server/dist/index.js",
+    "smoke": "node scripts/smoke-neon-hotspot.mjs",
+    "test": "node --test packages/shared/dist/lib/shared.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.2"
+  }
+}

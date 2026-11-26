@@ -1,0 +1,16 @@
+{
+  "name": "@wa-sister/backup-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.19",
+    "@wa-sister/shared": "0.1.0",
+    "hono": "^4.13.22",
+    "zod": "^3.25.76"
+  }
+}

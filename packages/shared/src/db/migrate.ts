@@ -1,6 +1,8 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createDb, loadEnv } from './client.js';
 
-const DDL = `
+export const SCHEMA_DDL = `
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
@@ -38,14 +40,20 @@ async function main() {
   loadEnv();
   const { pool } = createDb();
   try {
-    await pool.query(DDL);
+    await pool.query(SCHEMA_DDL);
     console.log('Schema pushed successfully (users, messages, backup_logs).');
   } finally {
     await pool.end();
   }
 }
 
-main().catch((err) => {
-  console.error('Schema migration failed:', err);
-  process.exitCode = 1;
-});
+const isDirectRun =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error('Schema migration failed:', err);
+    process.exitCode = 1;
+  });
+}

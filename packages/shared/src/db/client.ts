@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
@@ -37,9 +38,12 @@ export function createDb(databaseUrl = process.env.DATABASE_URL) {
   };
 }
 
-export async function getCloudTime(pool: pg.Pool): Promise<Date> {
-  const result = await pool.query<{ cloud_time: Date | string }>('SELECT NOW() AS cloud_time');
-  const raw = result.rows[0]?.cloud_time;
+export type CloudDb = ReturnType<typeof createDb>['db'];
+
+export async function getCloudTime(db: Pick<CloudDb, 'execute'>): Promise<Date> {
+  const result = await db.execute(sql`SELECT NOW() AS cloud_time`);
+  const rows = (result as unknown as { rows: Array<{ cloud_time: Date | string }> }).rows;
+  const raw = rows[0]?.cloud_time;
   if (!raw) throw new Error('Failed to fetch cloud DB time');
   return raw instanceof Date ? raw : new Date(raw);
 }

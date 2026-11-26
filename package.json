@@ -7,14 +7,21 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm -w @wa-sister/shared run build && npm -w @wa-sister/backup-server run build",
+    "build": "npm -w @wa-sister/shared run build && npm -w @wa-sister/app-server run build && npm -w @wa-sister/backup-server run build",
     "db:push": "node packages/shared/dist/db/migrate.js",
     "db:seed": "node packages/shared/dist/db/seed.js",
+    "db:wipe": "node packages/shared/dist/db/wipe.js",
+    "dev:app": "node apps/app-server/dist/index.js",
     "dev:backup": "node apps/backup-server/dist/index.js",
+    "backup:health": "node apps/backup-server/dist/cli.js health",
+    "backup:full": "node apps/backup-server/dist/cli.js full",
+    "backup:list": "node apps/backup-server/dist/cli.js list",
+    "backup:restore": "node apps/backup-server/dist/cli.js restore",
     "smoke": "node scripts/smoke-neon-hotspot.mjs",
-    "test": "node --test packages/shared/dist/lib/shared.test.js"
+    "test": "node --test packages/shared/dist/lib/shared.test.js apps/app-server/dist/app.test.js apps/backup-server/dist/app.test.js"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.16",
     "@types/node": "^22.15.0",
     "typescript": "^5.8.2"
   }

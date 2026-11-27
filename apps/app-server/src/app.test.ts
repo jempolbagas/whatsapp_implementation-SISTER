@@ -232,6 +232,105 @@ describe('app-server integration', () => {
     assert.equal(downRes.status, 502);
   });
 
+  it('rejects self-send (400), missing recipient (404), and serves authorized /conversations/:userA/:userB (200)', async () => {
+    const bagas = await loginAs(serverA, 'bagas');
+    const yasmin = await loginAs(serverB, 'yasmin');
+
+    const selfSend = await serverA.request('/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${bagas.token}`,
+      },
+      body: JSON.stringify({ recipientId: bagas.user.id, body: 'to myself' }),
+    });
+    assert.equal(selfSend.status, 400);
+
+    const missingRecipient = await serverA.request('/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${bagas.token}`,
+      },
+      body: JSON.stringify({ recipientId: 99999, body: 'to nobody' }),
+    });
+    assert.equal(missingRecipient.status, 404);
+    const missingBody = (await missingRecipient.json()) as { code: string };
+    assert.equal(missingBody.code, 'RECIPIENT_NOT_FOUND');
+
+    for (const viewer of [bagas, yasmin]) {
+      const convRes = await serverA.request(
+        `/conversations/${bagas.user.id}/${yasmin.user.id}`,
+        { headers: { authorization: `Bearer ${viewer.token}` } },
+      );
+      assert.equal(convRes.status, 200);
+      const convBody = (await convRes.json()) as {
+        messages: Array<{ body: string }>;
+        cloudDbTime: string;
+      };
+      assert.deepEqual(
+        convBody.messages.map((m) => m.body),
+        ['msg-1', 'msg-2', 'msg-3'],
+      );
+      assert.equal(Number.isNaN(Date.parse(convBody.cloudDbTime)), false);
+    }
+  });
+
+  it('returns 503 DB_UNAVAILABLE on wrapped DB outages and 500 JSON on non-DB errors', async () => {
+    const bagas = await loginAs(serverA, 'bagas');
+
+    const makeFailingDb = (err: Error) =>
+      ({
+        select: () => ({
+          from: () => ({
+            orderBy: async () => {
+              throw err;
+            },
+          }),
+        }),
+      }) as unknown as CloudDb;
+
+    const outageApp = createAppServer({
+      nodeName: 'db-outage-test',
+      clockSkewMs: 0,
+      db: makeFailingDb(
+        new Error('Failed query: select * from users', {
+          cause: new AggregateError([
+            Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), {
+              code: 'ECONNREFUSED',
+            }),
+          ]),
+        }),
+      ),
+      backupServerUrl: 'http://backup.local:4000',
+      jwtSecret: JWT_SECRET,
+      backupApiKey: BACKUP_API_KEY,
+    });
+
+    const outageRes = await outageApp.request('/users', {
+      headers: { authorization: `Bearer ${bagas.token}` },
+    });
+    assert.equal(outageRes.status, 503);
+    const outageBody = (await outageRes.json()) as { code: string };
+    assert.equal(outageBody.code, 'DB_UNAVAILABLE');
+
+    const bugApp = createAppServer({
+      nodeName: 'non-db-error-test',
+      clockSkewMs: 0,
+      db: makeFailingDb(new Error('Cannot connect UI widget')),
+      backupServerUrl: 'http://backup.local:4000',
+      jwtSecret: JWT_SECRET,
+      backupApiKey: BACKUP_API_KEY,
+    });
+
+    const bugRes = await bugApp.request('/users', {
+      headers: { authorization: `Bearer ${bagas.token}` },
+    });
+    assert.equal(bugRes.status, 500);
+    const bugBody = (await bugRes.json()) as { error: string };
+    assert.equal(bugBody.error, 'Internal server error');
+  });
+
   it('returns clean 401 USER_NOT_FOUND when DB is wiped while JWT is still held', async () => {
     const bagas = await loginAs(serverA, 'bagas');
     const yasmin = await loginAs(serverB, 'yasmin');

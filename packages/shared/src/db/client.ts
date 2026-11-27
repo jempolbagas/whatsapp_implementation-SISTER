@@ -32,10 +32,74 @@ export function createDb(databaseUrl = process.env.DATABASE_URL) {
     ssl: requiresSsl ? { rejectUnauthorized: true } : undefined,
   });
 
+  pool.on('error', (err) => {
+    console.error('Idle DB pool error:', err.message);
+  });
+
   return {
     db: drizzle(pool, { schema }),
     pool,
   };
+}
+
+const DB_CONN_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'ECONNRESET',
+  '57P01',
+  '57P02',
+  '57P03',
+  '08000',
+  '08001',
+  '08003',
+  '08006',
+]);
+
+const DB_CONN_ERROR_MSG_RE =
+  /\b(ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|57P01)\b|Connection terminated|timeout exceeded when trying to connect/i;
+
+export function isDbConnectionError(err: unknown): boolean {
+  const queue: unknown[] = [err];
+  const seen = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (cur == null || seen.has(cur)) continue;
+    seen.add(cur);
+
+    if (typeof cur === 'string') {
+      if (DB_CONN_ERROR_MSG_RE.test(cur)) return true;
+      continue;
+    }
+
+    if (typeof cur !== 'object') continue;
+
+    const record = cur as {
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+
+    if (typeof record.code === 'string' && DB_CONN_ERROR_CODES.has(record.code)) {
+      return true;
+    }
+    if (typeof record.message === 'string' && DB_CONN_ERROR_MSG_RE.test(record.message)) {
+      return true;
+    }
+
+    if (record.cause !== undefined) {
+      queue.push(record.cause);
+    }
+    if (Array.isArray(record.errors)) {
+      for (const nested of record.errors) {
+        queue.push(nested);
+      }
+    }
+  }
+
+  return false;
 }
 
 export type CloudDb = ReturnType<typeof createDb>['db'];

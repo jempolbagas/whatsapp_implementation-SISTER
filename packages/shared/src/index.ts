@@ -1,4 +1,5 @@
 export {
+  backupEnvelopeSchema,
   backupUserSchema,
   computeBackupChecksum,
   loginSchema,
@@ -12,7 +13,7 @@ export type {
   BackupPayload,
   BackupUserRecord,
 } from './contracts/schemas.js';
-export { createDb, getCloudTime, loadEnv } from './db/client.js';
+export { createDb, getCloudTime, isDbConnectionError, loadEnv } from './db/client.js';
 export type { CloudDb } from './db/client.js';
 export { SCHEMA_DDL } from './db/migrate.js';
 export { backupLogs, messages, users } from './db/schema.js';

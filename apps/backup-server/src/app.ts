@@ -1,17 +1,25 @@
 import {
   assertWindowsAndLinuxSafeFilename,
+  backupEnvelopeSchema,
   backupLogs,
   backupUserSchema,
   buildSafeBackupFilename,
   computeBackupChecksum,
   getCloudTime,
+  isDbConnectionError,
   messages,
   restoreFullSchema,
   safeKeyEqual,
   users,
 } from '@wa-sister/shared';
-import type { BackupEnvelope, BackupPayload, CloudDb } from '@wa-sister/shared';
-import { asc, eq, or, sql } from 'drizzle-orm';
+import type {
+  BackupEnvelope,
+  BackupMessageRecord,
+  BackupPayload,
+  BackupUserRecord,
+  CloudDb,
+} from '@wa-sister/shared';
+import { asc, count, eq, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { constants } from 'node:fs';
 import { access, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
@@ -25,6 +33,59 @@ export interface BackupServerOptions {
 
 export function createBackupServer(opts: BackupServerOptions) {
   const app = new Hono();
+
+  app.onError((err, c) => {
+    if (isDbConnectionError(err)) {
+      return c.json({ error: 'Cloud database unavailable', code: 'DB_UNAVAILABLE' }, 503);
+    }
+    return c.json({ error: 'Internal server error' }, 500);
+  });
+
+  async function writeBackupSnapshot(params: {
+    scope: 'user' | 'full';
+    userId: number | null;
+    label: string;
+    cloudTime: Date;
+    users: BackupUserRecord[];
+    messages: BackupMessageRecord[];
+  }) {
+    const cloudTimestamp = params.cloudTime.toISOString();
+    const payload: BackupPayload = {
+      version: 1,
+      scope: params.scope,
+      userId: params.userId,
+      cloudTimestamp,
+      counts: { users: params.users.length, messages: params.messages.length },
+      data: {
+        users: params.users,
+        messages: params.messages,
+      },
+    };
+
+    const checksumSha256 = computeBackupChecksum(cloudTimestamp, payload.data);
+    const envelope: BackupEnvelope = { ...payload, checksumSha256 };
+    const filename = buildSafeBackupFilename(params.scope, params.label, cloudTimestamp);
+
+    await mkdir(opts.backupDir, { recursive: true });
+    const serialized = JSON.stringify(envelope, null, 2);
+    await writeFile(path.join(opts.backupDir, filename), serialized, 'utf8');
+
+    await opts.db.insert(backupLogs).values({
+      requestedByUserId: params.userId,
+      scope: params.scope,
+      filename,
+      checksumSha256,
+      rowCount: params.users.length + params.messages.length,
+    });
+
+    return {
+      filename,
+      checksumSha256,
+      cloudTimestamp,
+      counts: payload.counts,
+      bytes: Buffer.byteLength(serialized, 'utf8'),
+    };
+  }
 
   app.use('*', async (c, next) => {
     const provided = c.req.header('x-backup-key');
@@ -99,56 +160,27 @@ export function createBackupServer(opts: BackupServerOptions) {
       getCloudTime(opts.db),
     ]);
 
-    const cloudTimestamp = cloudTime.toISOString();
-    const payload: BackupPayload = {
-      version: 1,
+    const snapshot = await writeBackupSnapshot({
       scope: 'user',
       userId,
-      cloudTimestamp,
-      counts: { users: userRows.length, messages: messageRows.length },
-      data: {
-        users: userRows.map((u) => ({
-          id: u.id,
-          username: u.username,
-          email: u.email,
-          createdAt: u.createdAt.toISOString(),
-        })),
-        messages: messageRows.map((m) => ({
-          id: m.id,
-          senderId: m.senderId,
-          recipientId: m.recipientId,
-          body: m.body,
-          createdAt: m.createdAt.toISOString(),
-        })),
-      },
-    };
-
-    const checksumSha256 = computeBackupChecksum(cloudTimestamp, payload.data);
-    const envelope: BackupEnvelope = { ...payload, checksumSha256 };
-    const filename = buildSafeBackupFilename('user', `u${userId}`, cloudTimestamp);
-
-    await mkdir(opts.backupDir, { recursive: true });
-    const serialized = JSON.stringify(envelope, null, 2);
-    await writeFile(path.join(opts.backupDir, filename), serialized, 'utf8');
-
-    await opts.db.insert(backupLogs).values({
-      requestedByUserId: userId,
-      scope: 'user',
-      filename,
-      checksumSha256,
-      rowCount: userRows.length + messageRows.length,
+      label: `u${userId}`,
+      cloudTime,
+      users: userRows.map((u) => ({
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        createdAt: u.createdAt.toISOString(),
+      })),
+      messages: messageRows.map((m) => ({
+        id: m.id,
+        senderId: m.senderId,
+        recipientId: m.recipientId,
+        body: m.body,
+        createdAt: m.createdAt.toISOString(),
+      })),
     });
 
-    return c.json(
-      {
-        filename,
-        checksumSha256,
-        cloudTimestamp,
-        counts: payload.counts,
-        bytes: Buffer.byteLength(serialized, 'utf8'),
-      },
-      201,
-    );
+    return c.json(snapshot, 201);
   });
 
   app.post('/backup/full', async (c) => {
@@ -158,57 +190,28 @@ export function createBackupServer(opts: BackupServerOptions) {
       getCloudTime(opts.db),
     ]);
 
-    const cloudTimestamp = cloudTime.toISOString();
-    const payload: BackupPayload = {
-      version: 1,
+    const snapshot = await writeBackupSnapshot({
       scope: 'full',
       userId: null,
-      cloudTimestamp,
-      counts: { users: userRows.length, messages: messageRows.length },
-      data: {
-        users: userRows.map((u) => ({
-          id: u.id,
-          username: u.username,
-          email: u.email,
-          passwordHash: u.passwordHash,
-          createdAt: u.createdAt.toISOString(),
-        })),
-        messages: messageRows.map((m) => ({
-          id: m.id,
-          senderId: m.senderId,
-          recipientId: m.recipientId,
-          body: m.body,
-          createdAt: m.createdAt.toISOString(),
-        })),
-      },
-    };
-
-    const checksumSha256 = computeBackupChecksum(cloudTimestamp, payload.data);
-    const envelope: BackupEnvelope = { ...payload, checksumSha256 };
-    const filename = buildSafeBackupFilename('full', 'system', cloudTimestamp);
-
-    await mkdir(opts.backupDir, { recursive: true });
-    const serialized = JSON.stringify(envelope, null, 2);
-    await writeFile(path.join(opts.backupDir, filename), serialized, 'utf8');
-
-    await opts.db.insert(backupLogs).values({
-      requestedByUserId: null,
-      scope: 'full',
-      filename,
-      checksumSha256,
-      rowCount: userRows.length + messageRows.length,
+      label: 'system',
+      cloudTime,
+      users: userRows.map((u) => ({
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        passwordHash: u.passwordHash,
+        createdAt: u.createdAt.toISOString(),
+      })),
+      messages: messageRows.map((m) => ({
+        id: m.id,
+        senderId: m.senderId,
+        recipientId: m.recipientId,
+        body: m.body,
+        createdAt: m.createdAt.toISOString(),
+      })),
     });
 
-    return c.json(
-      {
-        filename,
-        checksumSha256,
-        cloudTimestamp,
-        counts: payload.counts,
-        bytes: Buffer.byteLength(serialized, 'utf8'),
-      },
-      201,
-    );
+    return c.json(snapshot, 201);
   });
 
   app.get('/backups', async (c) => {
@@ -250,19 +253,24 @@ export function createBackupServer(opts: BackupServerOptions) {
       throw err;
     }
 
-    let envelope: BackupEnvelope;
+    let rawJson: unknown;
     try {
-      envelope = JSON.parse(raw) as BackupEnvelope;
+      rawJson = JSON.parse(raw);
     } catch {
       return c.json({ error: 'Malformed backup JSON' }, 422);
     }
 
-    if (envelope.scope !== 'full') {
-      return c.json({ error: 'Only full-scope snapshots can be used for /restore/full' }, 400);
+    const parsedEnvelope = backupEnvelopeSchema.safeParse(rawJson);
+    if (!parsedEnvelope.success) {
+      return c.json(
+        { error: 'Invalid backup envelope structure', details: parsedEnvelope.error.flatten() },
+        422,
+      );
     }
 
-    if (!envelope.cloudTimestamp || !envelope.data || !envelope.checksumSha256) {
-      return c.json({ error: 'Invalid backup envelope structure' }, 422);
+    const envelope = parsedEnvelope.data;
+    if (envelope.scope !== 'full') {
+      return c.json({ error: 'Only full-scope snapshots can be used for /restore/full' }, 400);
     }
 
     const expectedChecksum = computeBackupChecksum(envelope.cloudTimestamp, envelope.data);
@@ -278,34 +286,38 @@ export function createBackupServer(opts: BackupServerOptions) {
     let restoredMessages = 0;
 
     await opts.db.transaction(async (tx) => {
-      for (const u of envelope.data.users) {
-        const inserted = await tx
+      if (envelope.data.users.length > 0) {
+        const insertedUsers = await tx
           .insert(users)
-          .values({
-            id: u.id,
-            username: u.username,
-            email: u.email,
-            passwordHash: u.passwordHash!,
-            createdAt: new Date(u.createdAt),
-          })
+          .values(
+            envelope.data.users.map((u) => ({
+              id: u.id,
+              username: u.username,
+              email: u.email,
+              passwordHash: u.passwordHash!,
+              createdAt: new Date(u.createdAt),
+            })),
+          )
           .onConflictDoNothing({ target: users.id })
           .returning({ id: users.id });
-        restoredUsers += inserted.length;
+        restoredUsers = insertedUsers.length;
       }
 
-      for (const m of envelope.data.messages) {
-        const inserted = await tx
+      if (envelope.data.messages.length > 0) {
+        const insertedMessages = await tx
           .insert(messages)
-          .values({
-            id: m.id,
-            senderId: m.senderId,
-            recipientId: m.recipientId,
-            body: m.body,
-            createdAt: new Date(m.createdAt),
-          })
+          .values(
+            envelope.data.messages.map((m) => ({
+              id: m.id,
+              senderId: m.senderId,
+              recipientId: m.recipientId,
+              body: m.body,
+              createdAt: new Date(m.createdAt),
+            })),
+          )
           .onConflictDoNothing({ target: messages.id })
           .returning({ id: messages.id });
-        restoredMessages += inserted.length;
+        restoredMessages = insertedMessages.length;
       }
 
       await tx.execute(
@@ -316,16 +328,16 @@ export function createBackupServer(opts: BackupServerOptions) {
       );
     });
 
-    const [allUsers, allMessages] = await Promise.all([
-      opts.db.select({ id: users.id }).from(users),
-      opts.db.select({ id: messages.id }).from(messages),
+    const [[userCountRow], [messageCountRow]] = await Promise.all([
+      opts.db.select({ total: count() }).from(users),
+      opts.db.select({ total: count() }).from(messages),
     ]);
 
     return c.json({
       restoredUsers,
       restoredMessages,
-      currentUsersCount: allUsers.length,
-      currentMessagesCount: allMessages.length,
+      currentUsersCount: Number(userCountRow?.total ?? 0),
+      currentMessagesCount: Number(messageCountRow?.total ?? 0),
     });
   });
 

@@ -1,5 +1,6 @@
 import {
   getCloudTime,
+  isDbConnectionError,
   loginSchema,
   messages,
   requestBackupSchema,
@@ -18,7 +19,6 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 type AppEnv = {
   Variables: {
     authUserId: number;
-    authUsername: string;
   };
 };
 
@@ -39,11 +39,6 @@ const safeUserColumns = {
   email: users.email,
   createdAt: users.createdAt,
 };
-
-function isDbConnectionError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|Connection terminated|57P01|connect/i.test(msg);
-}
 
 function parsePositiveInt(raw: string | undefined): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
@@ -87,7 +82,6 @@ export function createAppServer(opts: AppServerOptions) {
         return c.json({ error: 'Unauthorized' }, 401);
       }
       c.set('authUserId', sub);
-      c.set('authUsername', String(payload.username ?? ''));
       await next();
     } catch {
       return c.json({ error: 'Unauthorized' }, 401);
@@ -162,7 +156,6 @@ export function createAppServer(opts: AppServerOptions) {
   app.use('/auth/me', requireAuth);
   app.use('/users', requireAuth);
   app.use('/messages', requireAuth);
-  app.use('/messages/*', requireAuth);
   app.use('/conversations/*', requireAuth);
   app.use('/backups/*', requireAuth);
 
@@ -227,47 +220,7 @@ export function createAppServer(opts: AppServerOptions) {
     return c.json({ message: created }, 201);
   });
 
-  app.get('/messages', async (c) => {
-    const authUserId = c.get('authUserId');
-    const asUserIdRaw = c.req.query('asUserId');
-    if (asUserIdRaw !== undefined && Number(asUserIdRaw) !== authUserId) {
-      return c.json({ error: 'Forbidden: cannot read messages as another user' }, 403);
-    }
-
-    const withUserId = parsePositiveInt(c.req.query('withUserId'));
-    if (!withUserId) {
-      return c.json({ error: 'Invalid withUserId' }, 400);
-    }
-
-    const [rows, cloudTime] = await Promise.all([
-      opts.db
-        .select()
-        .from(messages)
-        .where(
-          or(
-            and(eq(messages.senderId, authUserId), eq(messages.recipientId, withUserId)),
-            and(eq(messages.senderId, withUserId), eq(messages.recipientId, authUserId)),
-          ),
-        )
-        .orderBy(asc(messages.createdAt), asc(messages.id)),
-      getCloudTime(opts.db),
-    ]);
-
-    return c.json({ messages: rows, cloudDbTime: cloudTime.toISOString() });
-  });
-
-  app.get('/conversations/:userA/:userB', async (c) => {
-    const authUserId = c.get('authUserId');
-    const userA = parsePositiveInt(c.req.param('userA'));
-    const userB = parsePositiveInt(c.req.param('userB'));
-
-    if (!userA || !userB) {
-      return c.json({ error: 'Invalid user IDs' }, 400);
-    }
-    if (authUserId !== userA && authUserId !== userB) {
-      return c.json({ error: 'Forbidden: cannot access another user conversation' }, 403);
-    }
-
+  async function getConversation(userA: number, userB: number) {
     const [rows, cloudTime] = await Promise.all([
       opts.db
         .select()
@@ -282,7 +235,37 @@ export function createAppServer(opts: AppServerOptions) {
       getCloudTime(opts.db),
     ]);
 
-    return c.json({ messages: rows, cloudDbTime: cloudTime.toISOString() });
+    return { messages: rows, cloudDbTime: cloudTime.toISOString() };
+  }
+
+  app.get('/messages', async (c) => {
+    const authUserId = c.get('authUserId');
+    const asUserIdRaw = c.req.query('asUserId');
+    if (asUserIdRaw !== undefined && Number(asUserIdRaw) !== authUserId) {
+      return c.json({ error: 'Forbidden: cannot read messages as another user' }, 403);
+    }
+
+    const withUserId = parsePositiveInt(c.req.query('withUserId'));
+    if (!withUserId) {
+      return c.json({ error: 'Invalid withUserId' }, 400);
+    }
+
+    return c.json(await getConversation(authUserId, withUserId));
+  });
+
+  app.get('/conversations/:userA/:userB', async (c) => {
+    const authUserId = c.get('authUserId');
+    const userA = parsePositiveInt(c.req.param('userA'));
+    const userB = parsePositiveInt(c.req.param('userB'));
+
+    if (!userA || !userB) {
+      return c.json({ error: 'Invalid user IDs' }, 400);
+    }
+    if (authUserId !== userA && authUserId !== userB) {
+      return c.json({ error: 'Forbidden: cannot access another user conversation' }, 403);
+    }
+
+    return c.json(await getConversation(userA, userB));
   });
 
   app.post('/backups/request', async (c) => {

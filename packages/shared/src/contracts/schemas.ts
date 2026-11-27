@@ -25,6 +25,44 @@ export const restoreFullSchema = z.object({
   filename: z.string().min(1),
 });
 
+export const backupUserRecordSchema = z
+  .object({
+    id: z.number().int().positive(),
+    username: z.string().min(1),
+    email: z.string().min(1),
+    passwordHash: z.string().min(1).optional(),
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const backupMessageRecordSchema = z
+  .object({
+    id: z.number().int().positive(),
+    senderId: z.number().int().positive(),
+    recipientId: z.number().int().positive(),
+    body: z.string(),
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const backupEnvelopeSchema = z.object({
+  version: z.number().int().positive(),
+  scope: z.enum(['user', 'full']),
+  userId: z.number().int().positive().nullable(),
+  cloudTimestamp: z.string().datetime({ offset: true }),
+  counts: z.object({
+    users: z.number().int().nonnegative(),
+    messages: z.number().int().nonnegative(),
+  }),
+  data: z
+    .object({
+      users: z.array(backupUserRecordSchema),
+      messages: z.array(backupMessageRecordSchema),
+    })
+    .strict(),
+  checksumSha256: z.string().min(1),
+});
+
 export interface BackupUserRecord {
   id: number;
   username: string;

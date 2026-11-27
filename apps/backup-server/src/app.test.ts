@@ -11,8 +11,10 @@ import {
   PRE_SEEDED_USERS,
   SCHEMA_DDL,
   users,
+  verifyPassword,
 } from '@wa-sister/shared';
 import type { BackupEnvelope, CloudDb } from '@wa-sister/shared';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/pglite';
 import { createBackupServer } from './app.js';
 
@@ -185,5 +187,128 @@ describe('backup-server integration', () => {
       .values({ senderId: 1, recipientId: 2, body: 'post-restore message' })
       .returning({ id: messages.id });
     assert.equal(postRestoreMsg.id, 4);
+
+    // Post-restore user login password hash verifies
+    const [restoredBagas] = await db.select().from(users).where(eq(users.username, 'bagas')).limit(1);
+    assert.ok(restoredBagas);
+    assert.equal(verifyPassword('SisterDemo2026!', restoredBagas.passwordHash), true);
+    assert.equal(verifyPassword('wrong-password', restoredBagas.passwordHash), false);
+  });
+
+  it('rejects malformed JSON and invalid envelope shape in /restore/full with 422 JSON', async () => {
+    await writeFile(path.join(backupDir, 'bad-json.json'), '{not valid json', 'utf8');
+    const badJsonRes = await backupApp.request('/restore/full', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-backup-key': BACKUP_KEY },
+      body: JSON.stringify({ filename: 'bad-json.json' }),
+    });
+    assert.equal(badJsonRes.status, 422);
+    assert.match(badJsonRes.headers.get('content-type') ?? '', /application\/json/);
+
+    await writeFile(
+      path.join(backupDir, 'bad-shape.json'),
+      JSON.stringify({ scope: 'full', data: 'bad' }),
+      'utf8',
+    );
+    const badShapeRes = await backupApp.request('/restore/full', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-backup-key': BACKUP_KEY },
+      body: JSON.stringify({ filename: 'bad-shape.json' }),
+    });
+    assert.equal(badShapeRes.status, 422);
+    const badShapeBody = (await badShapeRes.json()) as { error: string };
+    assert.equal(badShapeBody.error, 'Invalid backup envelope structure');
+  });
+
+  it('restores a full backup with empty messages cleanly and resets sequence to 1', async () => {
+    await pglite.exec('TRUNCATE TABLE messages RESTART IDENTITY CASCADE');
+
+    const emptyMsgBackupRes = await backupApp.request('/backup/full', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-backup-key': BACKUP_KEY },
+      body: JSON.stringify({}),
+    });
+    assert.equal(emptyMsgBackupRes.status, 201);
+    const { filename } = (await emptyMsgBackupRes.json()) as { filename: string };
+
+    await pglite.exec('TRUNCATE TABLE backup_logs, messages, users RESTART IDENTITY CASCADE');
+
+    const restoreRes = await backupApp.request('/restore/full', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-backup-key': BACKUP_KEY },
+      body: JSON.stringify({ filename }),
+    });
+    assert.equal(restoreRes.status, 200);
+    const restoreBody = (await restoreRes.json()) as {
+      restoredUsers: number;
+      restoredMessages: number;
+      currentUsersCount: number;
+      currentMessagesCount: number;
+    };
+    assert.equal(restoreBody.restoredUsers, 6);
+    assert.equal(restoreBody.restoredMessages, 0);
+    assert.equal(restoreBody.currentUsersCount, 6);
+    assert.equal(restoreBody.currentMessagesCount, 0);
+
+    const [restoredBagas] = await db.select().from(users).where(eq(users.username, 'bagas')).limit(1);
+    assert.ok(restoredBagas);
+    assert.equal(verifyPassword('SisterDemo2026!', restoredBagas.passwordHash), true);
+
+    const [firstMsg] = await db
+      .insert(messages)
+      .values({ senderId: 1, recipientId: 2, body: 'first after empty restore' })
+      .returning({ id: messages.id });
+    assert.equal(firstMsg.id, 1);
+  });
+
+  it('returns 503 JSON on DB outages and 500 JSON on unexpected errors', async () => {
+    const makeFailingDb = (err: Error) =>
+      ({
+        select: () => ({
+          from: () => ({
+            orderBy: async () => {
+              throw err;
+            },
+          }),
+        }),
+      }) as unknown as CloudDb;
+
+    const outageApp = createBackupServer({
+      backupDir,
+      db: makeFailingDb(
+        new Error('Failed query: select * from users', {
+          cause: new AggregateError([
+            Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), {
+              code: 'ECONNREFUSED',
+            }),
+          ]),
+        }),
+      ),
+      backupApiKey: BACKUP_KEY,
+    });
+
+    const outageRes = await outageApp.request('/backup/full', {
+      method: 'POST',
+      headers: { 'x-backup-key': BACKUP_KEY },
+    });
+    assert.equal(outageRes.status, 503);
+    assert.match(outageRes.headers.get('content-type') ?? '', /application\/json/);
+    const outageBody = (await outageRes.json()) as { code: string };
+    assert.equal(outageBody.code, 'DB_UNAVAILABLE');
+
+    const errorApp = createBackupServer({
+      backupDir,
+      db: makeFailingDb(new Error('Unexpected failure')),
+      backupApiKey: BACKUP_KEY,
+    });
+
+    const errorRes = await errorApp.request('/backup/full', {
+      method: 'POST',
+      headers: { 'x-backup-key': BACKUP_KEY },
+    });
+    assert.equal(errorRes.status, 500);
+    assert.match(errorRes.headers.get('content-type') ?? '', /application\/json/);
+    const errorBody = (await errorRes.json()) as { error: string };
+    assert.equal(errorBody.error, 'Internal server error');
   });
 });
